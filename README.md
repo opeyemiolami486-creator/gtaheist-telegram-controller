@@ -45,6 +45,27 @@ python3 runner.py --username sandboxbot --wallet <valid-solana-address> --target
 
 Only treat a live run as successful when the captured `/api/run` response is verified by the game and `/api/bind` succeeds. Live runs require a valid wallet and network access; unit tests do not submit anything.
 
+## Direct official-engine controller
+
+`dc_controller.py` drives the public game's own `window.__dc` surface in a headless Chromium page. It sets only normal movement flags in `window.__dc.keys`, uses the official client update loop and terminal transitions, captures the untouched `/api/run` request/response, and never invents a score, nonce, or run code.
+
+The default is an isolated dry run. It blocks `/api/start`, `/api/run`, and `/api/bind`, so it cannot create or submit a live score:
+
+```bash
+python3 dc_controller.py --time-limit 10 --out-dir run-artifacts/dc-dry-run
+```
+
+The live path is opt-in with `--submit`. In that mode the browser uses the site's normal server-issued `/api/start` code and nonce, then the official client submits its own `/api/run` payload:
+
+```bash
+python3 dc_controller.py --username Bigdawg \
+  --wallet YOUR_WALLET \
+  --target 7000000000 --time-limit 90 --submit \
+  --out-dir run-artifacts/dc-live-90
+```
+
+`official_engine_probe.py` remains the non-submitting fixed-step probe for reproducibility experiments.
+
 ## Clean-room headless sandbox
 
 `headless_sandbox.py` is an independent, offline approximation of the observed public state contract. It models movement, pickups, mission markers, stashes, cops, hazards, wanted level, banking, a simulation clock, and the controller's input flags. It contains no copied game source or assets and never contacts the official game or submits a score. This makes it suitable for deterministic policy comparisons before live validation:
