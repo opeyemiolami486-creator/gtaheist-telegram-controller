@@ -18,7 +18,7 @@ API = os.getenv("GTAHEIST_API_URL", "https://api.gtaheist.fun")
 CONTROLLER_JS = r"""
 ({targetScore, timeLimit}) => {
   const d = window.__dc, keys = d.keys, wallStart = performance.now();
-  let simulationStart = null, lastPlayer = null, stuckFrames = 0, lastTarget = null;
+  let simulationStart = null, lastPlayer = null, stuckFrames = 0, lastTarget = null, emergencyReverseUntil = 0;
   const history = [], frames = [];
   const clean = () => { for (const k of ['up','down','left','right','drift','boost']) keys[k] = 0; };
   const point = x => x && Number.isFinite(x.x) && Number.isFinite(x.z) ? {x:x.x,z:x.z} : null;
@@ -46,7 +46,7 @@ CONTROLLER_JS = r"""
     if(s.threat>=.92) return null;
     const candidates=[];
     if(s.mission) candidates.push({kind:'mission',...s.mission,priority:1000});
-    if(s.bag>=1000) s.stashes.forEach(x=>candidates.push({kind:'stash',...x,priority:900-distance(x,s.player)}));
+    if(s.bag>=5000) s.stashes.forEach(x=>candidates.push({kind:'stash',...x,priority:900-distance(x,s.player)}));
     s.coins.forEach(x=>{const tok=x.userData&&x.userData.tok; const bonus={$PUMP:60,$PEPE:50,$WIF:35,$BONK:30}[tok]||10; candidates.push({kind:'coin',x:x.x,z:x.z,priority:bonus-distance(x,s.player)*.05});});
     if(s.vault) candidates.push({kind:'vault',...s.vault,priority:75});
     if(s.rugHeist) candidates.push({kind:'rug_heist',...s.rugHeist,priority:75});
@@ -64,15 +64,23 @@ CONTROLLER_JS = r"""
     if(s.bag>=targetScore){clean();d.finish();return;}
     if(simElapsed>=timeLimit){clean();d.wasted('time limit');return;}
     if(wallElapsed>=Math.max(timeLimit*4,timeLimit+120)){clean();d.wasted('browser safety limit');return;}
-    if(!lastTarget || !safe(lastTarget,s) || (lastTarget.kind==='mission'&&!s.mission)) lastTarget=select(s);
     const nearest=s.cops.map(c=>({c,d:distance(c,s.player)})).sort((a,b)=>a.d-b.d)[0];
+    // A retained objective is not worth crossing a close cop. Clear it before
+    // planning so the emergency escape cannot be pulled back toward the target.
+    if(nearest&&nearest.d<52) lastTarget=null;
+    if((!nearest||nearest.d>=52) && (!lastTarget || !safe(lastTarget,s) || (lastTarget.kind==='mission'&&!s.mission))) lastTarget=select(s);
     let desired=lastTarget?Math.atan2(lastTarget.x-s.player.x,lastTarget.z-s.player.z):s.player.h;
-    if(nearest&&nearest.d<62){const away=Math.atan2(s.player.x-nearest.c.x,s.player.z-nearest.c.z); desired=nearest.d<34?away:away*.78+desired*.22;}
-    if(stuckFrames>=12){keys.up=0;keys.down=1;keys.left=(Math.floor(stuckFrames/20)%2)===0?1:0;keys.right=keys.left?0:1;keys.drift=1;keys.boost=0;frame.input={...keys};return;}
+    if(nearest&&nearest.d<52){desired=Math.atan2(s.player.x-nearest.c.x,s.player.z-nearest.c.z);}
+    else if(nearest&&nearest.d<62){const away=Math.atan2(s.player.x-nearest.c.x,s.player.z-nearest.c.z); desired=away*.78+desired*.22;}
+    if(stuckFrames>=12&&(!nearest||nearest.d>=52)){keys.up=0;keys.down=1;keys.left=(Math.floor(stuckFrames/20)%2)===0?1:0;keys.right=keys.left?0:1;keys.drift=1;keys.boost=0;frame.input={...keys};return;}
     const delta=(desired-s.player.h+Math.PI)%(2*Math.PI)-Math.PI;
-    keys.up=1;keys.down=(s.threat>.86&&nearest&&nearest.d<28)?1:0;
+    const emergency=!!(nearest&&nearest.d<52);
+    if(!emergency) emergencyReverseUntil=0;
+    else if(s.speed<2&&performance.now()>=emergencyReverseUntil) emergencyReverseUntil=performance.now()+1500;
+    const emergencyReverse=emergency&&performance.now()<emergencyReverseUntil;
+    keys.up=emergencyReverse?0:1;keys.down=emergencyReverse?1:((s.threat>.86&&nearest&&nearest.d<28)?1:0);
     keys.left=delta<-.12?1:0;keys.right=delta>.12?1:0;keys.drift=Math.abs(delta)>1?1:0;
-    keys.boost=(s.threat<.45&&s.want<2&&Math.abs(delta)<.5)?1:0; frame.input={...keys};
+    keys.boost=(!emergency&&s.threat<.45&&s.want<2&&Math.abs(delta)<.5)?1:0; frame.input={...keys};
   };
   const timer=setInterval(tick,50); tick();
   return new Promise(resolve=>{const finish=()=>{clearInterval(timer);clean();resolve({last:snapshot(),history:history.slice(-240),frames:frames.slice(-120),wallElapsed:(performance.now()-wallStart)/1000,simulationStart});};

@@ -5,6 +5,7 @@ from planner import (
     Target,
     choose_target,
     cop_avoidance_heading,
+    emergency_escape_heading,
     invalidate_target,
     recovery_inputs,
     should_boost,
@@ -21,7 +22,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(t.kind, "mission")
 
     def test_stash_is_selected_when_bag_is_ready(self):
-        t = choose_target({"player": {"x": 0, "z": 0}, "bag": 2000, "stashes": [{"x": 4, "z": 4}], "coins": [{"x": 1, "z": 1}]})
+        t = choose_target({"player": {"x": 0, "z": 0}, "bag": 6000, "stashes": [{"x": 4, "z": 4}], "coins": [{"x": 1, "z": 1}]})
         self.assertEqual(t.kind, "stash")
 
     def test_cop_avoidance_heading_points_away(self):
@@ -52,7 +53,13 @@ class PlannerTests(unittest.TestCase):
     def test_steering_avoids_cop_and_disables_boost(self):
         flags = steering({"x": 0, "z": 0, "h": 0}, Target("coin", 0, 40, 1), danger=0.9, cops=[{"x": 0, "z": 20}], wanted=2)
         self.assertEqual(flags["boost"], 0)
+        self.assertEqual(flags["up"], 0)
         self.assertEqual(flags["down"], 1)
+
+    def test_emergency_escape_points_directly_away_from_close_cop(self):
+        heading = emergency_escape_heading({"x": 0, "z": 0}, {"x": 0, "z": 10})
+        self.assertIsNotNone(heading)
+        self.assertAlmostEqual(abs(heading), 3.141592653589793, places=3)
 
     def test_simulation_clock_termination(self):
         self.assertFalse(simulation_complete(9.9, 10))

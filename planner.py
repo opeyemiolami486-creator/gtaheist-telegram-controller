@@ -64,6 +64,15 @@ def cop_avoidance_heading(player: dict[str, Any], cops: Iterable[Any], danger_ra
     return atan2(escape_x, escape_z)
 
 
+def emergency_escape_heading(player: dict[str, Any], cop: Any, *, side: int = 1) -> float | None:
+    """Choose a hard escape/tangent heading when a cop is already close."""
+    pp, cp = _pos(player), _pos(cop)
+    if not pp or not cp:
+        return None
+    away = atan2(pp[0] - cp[0], pp[1] - cp[1])
+    return away
+
+
 def _hazard_positions(state: dict[str, Any]) -> list[Any]:
     values: list[Any] = []
     for key in ("spikes", "roadblocks", "hazards", "rugs", "obstacles"):
@@ -102,7 +111,7 @@ def choose_target(state: dict[str, Any]) -> Target | None:
     if mission:
         candidates.append(Target("mission", mission[0], mission[1], 1000.0))
     bag = float(state.get("bag") or 0)
-    if bag >= 1000:
+    if bag >= 5000:
         for item in state.get("stashes", []) or []:
             pos = _pos(item)
             if pos:
@@ -147,12 +156,17 @@ def steering(player: dict[str, Any], target: Target | None, *, danger: float = 0
     if stuck_frames >= 12:
         return recovery_inputs(player, stuck_frames=stuck_frames)
     heading = float(player.get("h", 0))
-    desired = cop_avoidance_heading(player, cops)
+    cop_choices = [(cop, _distance(player, cop)) for cop in cops if _pos(cop) and _pos(player)]
+    nearest = min(cop_choices, key=lambda item: item[1]) if cop_choices else None
+    desired = emergency_escape_heading(player, nearest[0], side=1 if stuck_frames % 2 == 0 else -1) if nearest and nearest[1] < 45 else cop_avoidance_heading(player, cops)
     if desired is None and target:
         desired = atan2(target.x - float(player.get("x", 0)), target.z - float(player.get("z", 0)))
     if desired is None:
         return {"up": 1, "down": 0, "left": 0, "right": 0, "drift": 0, "boost": 0}
     delta = (desired - heading + pi) % (2 * pi) - pi
-    brake = int(danger > 0.82 and abs(delta) > 1.2)
-    return {"up": 1, "down": brake, "left": int(delta < -0.12), "right": int(delta > 0.12),
+    emergency = bool(nearest and nearest[1] < 45)
+    speed = float(player.get("speed", hypot(float(player.get("vx", 0)), float(player.get("vz", 0)))))
+    emergency_reverse = emergency and speed < 2.0
+    brake = int(not emergency and danger > 0.82 and abs(delta) > 1.2)
+    return {"up": int(not emergency_reverse), "down": int(emergency_reverse or brake), "left": int(delta < -0.12), "right": int(delta > 0.12),
             "drift": int(abs(delta) > 1.0), "boost": int(should_boost(danger=danger, turn_delta=delta, wanted=wanted))}
