@@ -73,7 +73,10 @@ async def run(username: str, wallet: str, target_score: int, time_limit: float, 
         context = await browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
         page = await context.new_page()
         await page.goto(SITE, wait_until="domcontentloaded", timeout=60000)
-        await page.evaluate("([name,wallet]) => { localStorage.setItem('gtd_name',name); localStorage.setItem('gtd_mode','pro'); localStorage.setItem('gth_wallet',wallet); }", [username, wallet])
+        # Leave the name empty during gameplay. The official game auto-submits
+        # immediately on game-over when a name is present; delaying the name
+        # lets the server's /api/start clock catch up before /api/run.
+        await page.evaluate("([wallet]) => { localStorage.removeItem('gtd_name'); localStorage.setItem('gtd_mode','pro'); localStorage.setItem('gth_wallet',wallet); }", [wallet])
         await page.reload(wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_function("() => window.__dc && document.querySelector('#start') && !document.querySelector('#start').disabled", timeout=60000)
         await page.evaluate("() => window.__dc && window.__dc.setMode && window.__dc.setMode('pro')")
@@ -82,9 +85,16 @@ async def run(username: str, wallet: str, target_score: int, time_limit: float, 
         await page.wait_for_function("() => window.__dc && window.__dc.S && window.__dc.S.run", timeout=15000)
         await page.wait_for_function("() => window.__dc.S.srv && window.__dc.S.srv.code && window.__dc.S.srv.nonce", timeout=10000)
         await page.wait_for_timeout(100)
+        await page.evaluate("() => { window.__runResponses=[]; const f=window.fetch; window.fetch=async(...a)=>{ const r=await f(...a); if(String(a[0]).includes('/api/run')) { const c=r.clone(); c.text().then(t=>window.__runResponses.push({status:r.status,body:t})).catch(()=>{}); } return r; }; }")
         run_result = await page.evaluate(CONTROLLER_JS, {"targetScore": target_score, "timeLimit": time_limit})
-        await page.wait_for_timeout(4500)
+        # The server starts measuring when /api/start is issued. Keep the
+        # official end screen open briefly so its measured duration is never
+        # behind the client-reported duration in very short smoke runs.
+        await page.wait_for_timeout(3000)
+        await page.evaluate("(name) => { localStorage.setItem('gtd_name', name); window.__dc && window.__dc.bw && window.__dc.bw(); }", username)
+        await page.wait_for_timeout(2500)
         binding = await page.evaluate("async ({api}) => { const d=window.__dc, s=d.S; try{ d.bw(); }catch(e){}; const until=Date.now()+6000; while(s.verified==null && Date.now()<until) await new Promise(r=>setTimeout(r,200)); if(s.verified!==true) return {status:409,body:{ok:false,error:'run not verified by game',verified:s.verified}}; const r=await fetch(api+'/api/bind',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:s.code || (s.srv&&s.srv.code),nonce:s.nonce || (s.srv&&s.srv.nonce),wallet:localStorage.getItem('gth_wallet')})}); return {status:r.status,body:await r.json().catch(()=>null)}; }", {"api": API})
+        run_result["server_responses"] = await page.evaluate("() => window.__runResponses || []")
         await page.evaluate("() => window.__dc && window.__dc.card && window.__dc.card()")
         await page.wait_for_timeout(1200)
         card_path = out / f"{run_result['last'].get('code') or 'run'}-card.png"
