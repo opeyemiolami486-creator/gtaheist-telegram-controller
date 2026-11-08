@@ -20,6 +20,10 @@ CONTROLLER_JS = r"""
   const d = window.__dc, keys = d.keys, wallStart = performance.now();
   let simulationStart = null, lastPlayer = null, stuckFrames = 0, lastTarget = null, lastPlanAt = 0;
   let escapingFromPolice = false, stopReason = null, lastPicks = null, lastMissions = null, lastCopBand = null;
+  let escapeState = 'clear', escapeEnteredAt = null, escapeClearSince = null;
+  let lastCopDistance = null, lastCopSampleAt = null, copClosingSpeed = 0, timeToContact = null;
+  let recoveryUntil = 0, recoveryAttempts = 0, recoveryPhase = 0;
+  let recoveryStartAt = null, recoveryStartPos = null, recoveryCooldownUntil = 0, recoveryFailures = 0;
   const history = [], frames = [], events = [];
   const clean = () => { for (const k of ['up','down','left','right','drift','boost']) keys[k] = 0; };
   const point = x => x && Number.isFinite(x.x) && Number.isFinite(x.z) ? {x:x.x,z:x.z} : null;
@@ -105,7 +109,7 @@ CONTROLLER_JS = r"""
     return lastTarget;
   };
   const tick = () => {
-    const s=snapshot(), wallElapsed=(performance.now()-wallStart)/1000;
+    const now=performance.now(), s=snapshot(), wallElapsed=(now-wallStart)/1000;
     if(simulationStart===null && Number.isFinite(s.time)) simulationStart=s.time;
     const simElapsed=simulationStart===null?0:Math.max(0,simulationStart-s.time);
     if(lastPicks===null) lastPicks=s.picks;
@@ -115,6 +119,12 @@ CONTROLLER_JS = r"""
     lastPicks=s.picks; lastMissions=s.missions;
     const copBand=s.nearestCopDistance===null?'none':s.nearestCopDistance<28?'critical':s.nearestCopDistance<45?'danger':s.nearestCopDistance<62?'caution':'clear';
     if(copBand!==lastCopBand){events.push({type:'cop_proximity',band:copBand,distance:s.nearestCopDistance,simulationElapsed:simElapsed});lastCopBand=copBand;}
+    if(lastCopDistance!==null&&s.nearestCopDistance!==null&&lastCopSampleAt!==null){
+      const sampleDt=Math.max(.05,(now-lastCopSampleAt)/1000);
+      copClosingSpeed=(lastCopDistance-s.nearestCopDistance)/sampleDt;
+      timeToContact=copClosingSpeed>0?s.nearestCopDistance/copClosingSpeed:null;
+    } else {copClosingSpeed=0;timeToContact=null;}
+    lastCopDistance=s.nearestCopDistance; lastCopSampleAt=now;
     if(lastPlayer && distance(lastPlayer,s.player)<2 && s.speed<2) stuckFrames++; else stuckFrames=0;
     lastPlayer={x:s.player.x,z:s.player.z};
     if(!s.running||s.over){if(!stopReason)stopReason=s.caught?'caught':(s.kind||'official_terminal');clean();}
@@ -122,24 +132,66 @@ CONTROLLER_JS = r"""
     else if(simElapsed>=timeLimit){stopReason='simulation_time_limit';clean();d.wasted('time limit');}
     else if(wallElapsed>=Math.max(timeLimit*4,timeLimit+120)){stopReason='browser_safety_watchdog';clean();d.wasted('browser safety limit');}
     const priorTarget=lastTarget;
-    if(s.nearestCopDistance!==null&&s.nearestCopDistance<22) escapingFromPolice=true;
-    else if(s.nearestCopDistance===null||s.nearestCopDistance>26) escapingFromPolice=false;
-    const target=(!s.running||s.over)?lastTarget:(escapingFromPolice?null:plan(s,performance.now()));
+    const shouldPrepareEscape=!!(s.nearestCopDistance!==null &&
+      (s.nearestCopDistance<55 || copClosingSpeed>8 || (timeToContact!==null&&timeToContact<3)));
+    const shouldHardEscape=!!(s.nearestCopDistance!==null &&
+      (s.nearestCopDistance<40 ||
+       (timeToContact!==null&&timeToContact<2.5) ||
+       copClosingSpeed>18 ||
+       (copClosingSpeed>10&&s.speed<12)));
+    if(shouldHardEscape && escapeState!=='hard_escape'){
+      escapeState='hard_escape'; escapeEnteredAt=simElapsed; escapeClearSince=null;
+      events.push({type:'escape_state',state:escapeState,reason:'hard-threat',distance:s.nearestCopDistance,timeToContact,simulationElapsed:simElapsed});
+    } else if(shouldPrepareEscape && escapeState==='clear'){
+      escapeState='escape'; escapeEnteredAt=simElapsed; escapeClearSince=null;
+      events.push({type:'escape_state',state:escapeState,reason:'approach-or-distance',distance:s.nearestCopDistance,copClosingSpeed,timeToContact,simulationElapsed:simElapsed});
+    } else if(escapeState!=='clear' && (s.nearestCopDistance===null || s.nearestCopDistance>75) && copClosingSpeed<=0){
+      if(escapeClearSince===null) escapeClearSince=now;
+      if(now-escapeClearSince>=1000){
+        escapeState='clear'; escapingFromPolice=false; escapeClearSince=null;
+        events.push({type:'escape_state',state:escapeState,reason:'released',distance:s.nearestCopDistance,simulationElapsed:simElapsed});
+      }
+    } else if(escapeState!=='clear'){escapeClearSince=null;}
+    escapingFromPolice=escapeState!=='clear';
+    const target=(!s.running||s.over)?lastTarget:(escapingFromPolice?null:plan(s,now));
     if(escapingFromPolice) lastTarget=null;
     if((priorTarget||target)&&!sameTarget(priorTarget,target)) events.push({type:'target_switch',from:priorTarget&&priorTarget.kind||null,to:target&&target.kind||null,simulationElapsed:simElapsed});
-    const frame={wallElapsed,simulationElapsed:simElapsed,frameTime:performance.now(),...s,target,stuckFrames};
+    const frame={wallElapsed,simulationElapsed:simElapsed,frameTime:now,...s,target,stuckFrames,
+      escapeState,copClosingSpeed,timeToContact,recoveryAttempts,belowSpeed:s.speed<2};
     history.push(frame); frames.push(frame); if(frames.length>120) frames.shift();
     if(!s.running||s.over||stopReason==='target_score'||stopReason==='simulation_time_limit'||stopReason==='browser_safety_watchdog') return;
     const nearest=s.cops.map(c=>({c,d:distance(c,s.player)})).sort((a,b)=>a.d-b.d)[0];
-    let desired=objectiveHeading(s.player,lastTarget,s.cops);
+    let desired=objectiveHeading(s.player,escapeState==='clear'?lastTarget:null,s.cops);
     if(desired===null) desired=s.player.h;
-    if(stuckFrames>=12&&!escapingFromPolice){keys.up=0;keys.down=1;keys.left=(Math.floor(stuckFrames/20)%2)===0?1:0;keys.right=keys.left?0:1;keys.drift=1;keys.boost=0;frame.input={...keys};return;}
+    if(recoveryStartAt!==null && now>=recoveryUntil){
+      const progress=recoveryStartPos?distance(recoveryStartPos,s.player):0;
+      if(progress<4) recoveryFailures++; else recoveryFailures=0;
+      events.push({type:'recovery_end',attempt:recoveryAttempts,progress,success:progress>=4,
+        failures:recoveryFailures,simulationElapsed:simElapsed});
+      recoveryStartAt=null; recoveryStartPos=null; recoveryCooldownUntil=now+Math.min(1800,450*(recoveryFailures+1));
+      stuckFrames=0;
+    }
+    if(stuckFrames>=8 && recoveryStartAt===null && now>=recoveryCooldownUntil){
+      recoveryAttempts++; recoveryPhase=recoveryFailures>=2?2:(recoveryAttempts-1)%3;
+      recoveryUntil=now+(recoveryPhase===2?700:450); recoveryStartAt=now; recoveryStartPos={x:s.player.x,z:s.player.z};
+      events.push({type:'recovery_start',attempt:recoveryAttempts,phase:recoveryPhase,escapeState,
+        failures:recoveryFailures,simulationElapsed:simElapsed});
+    }
+    if(recoveryStartAt!==null && now<recoveryUntil){
+      const side=(recoveryAttempts%2===1)?1:0;
+      keys.left=side; keys.right=side?0:1; keys.drift=1;
+      keys.down=recoveryPhase===0?1:0; keys.up=recoveryPhase===0?0:1;
+      keys.boost=((escapeState!=='clear'&&s.nearestCopDistance!==null&&s.nearestCopDistance>3)||recoveryPhase===2)?1:0;
+      frame.input={...keys}; return;
+    }
     const delta=(desired-s.player.h+Math.PI)%(2*Math.PI)-Math.PI;
     const emergency=!!(nearest&&nearest.d<100);
     keys.up=1;keys.down=0;
     // Official telemetry shows left increases heading and right decreases it.
     keys.left=delta>.12?1:0;keys.right=delta<-.12?1:0;keys.drift=Math.abs(delta)>1?1:0;
-    keys.boost=(s.want<2&&Math.abs(delta)<.5&&((!emergency&&s.threat<.45)||emergency))?1:0; frame.input={...keys};
+    const openEscapeLane=escapeState!=='clear' && (!nearest || nearest.d>3);
+    keys.boost=(s.want<2&&Math.abs(delta)<.5&&
+      (escapeState==='clear' ? s.threat<.45 : openEscapeLane))?1:0; frame.input={...keys};
   };
   const timer=setInterval(tick,50); tick();
   return new Promise(resolve=>{const finish=()=>{clearInterval(timer);clean();const last=snapshot();last.terminalReason=stopReason||(last.caught?'caught':last.kind||'official_terminal');resolve({last,history:history.slice(-240),frames:frames.slice(-120),events,wallElapsed:(performance.now()-wallStart)/1000,simulationStart});};
@@ -179,6 +231,20 @@ def summarize_controller_diagnostics(controller: dict[str, Any]) -> dict[str, An
     events = controller.get("events") or []
     history = controller.get("history") or []
     last = controller.get("last") or {}
+    escape_events = [e for e in events if e.get("type") == "escape_state"]
+    recovery_events = [e for e in events if e.get("type") == "recovery_start"]
+    threat_switches = sum(
+        1 for e in events
+        if e.get("type") == "target_switch"
+        and any(
+            (f.get("simulationElapsed") or 0) == e.get("simulationElapsed")
+            and (f.get("threat") or 0) >= 0.35
+            for f in history
+        )
+    )
+    low_speed = [f for f in history if f.get("belowSpeed") or f.get("speed", 999) < 2]
+    closing = [float(f["copClosingSpeed"]) for f in history if f.get("copClosingSpeed") is not None]
+    contact_times = [float(f["timeToContact"]) for f in history if f.get("timeToContact") is not None]
     return {
         "pickups_observed": sum(int(e.get("count", 0)) for e in events if e.get("type") == "pickup"),
         "missions_observed": sum(int(e.get("count", 0)) for e in events if e.get("type") == "mission_progress"),
@@ -192,6 +258,18 @@ def summarize_controller_diagnostics(controller: dict[str, Any]) -> dict[str, An
             default=None,
         ),
         "maximum_threat": max((float(f.get("threat", 0)) for f in history), default=0.0),
+        "escape_state_transitions": [
+            {"state": e.get("state"), "reason": e.get("reason"),
+             "distance": e.get("distance"), "simulationElapsed": e.get("simulationElapsed")}
+            for e in escape_events
+        ],
+        "first_escape_time": next((e.get("simulationElapsed") for e in escape_events), None),
+        "recovery_attempts": len(recovery_events),
+        "low_speed_frames": len(low_speed),
+        "low_speed_fraction": len(low_speed) / len(history) if history else 0.0,
+        "maximum_cop_closing_speed": max(closing, default=0.0),
+        "minimum_time_to_contact": min(contact_times, default=None),
+        "target_switches_during_threat": threat_switches,
         "terminal_reason": last.get("terminalReason"),
         "terminal_kind": last.get("kind"),
         "caught_flag": last.get("caught"),

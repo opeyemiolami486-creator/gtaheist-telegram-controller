@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "site": "https://www.gtaheist.fun/game",
+  "retrieved_at_utc": "2026-11-08T19:44:39.272617+00:00",
+  "client_hash": "051e6ef9b8f550eac345a7fa855c38934e59ebffda46314f7cc29ac3cbe0f8ea",
+  "client_version": "content-sha256:051e6ef9b8f550eac345a7fa855c38934e59ebffda46314f7cc29ac3cbe0f8ea",
+  "assets": [
+    {
+      "name": "game.html",
+      "url": "https://www.gtaheist.fun/game/",
+      "bytes": 2933195,
+      "sha256": "a328e728da7a705a600d648839b8288f214cd6b7fbc5f6e7ea792e943031b3cd"
+    },
+    {
+      "name": "campaign.js",
+      "url": "https://www.gtaheist.fun/game/campaign.js",
+      "bytes": 95697,
+      "sha256": "ff7eb566745a5a2a1316f65637c8e1996f0089aebd3c43b86aee03f7344581e0"
+    },
+    {
+      "name": "share-card.mjs",
+      "url": "https://www.gtaheist.fun/game/share-card.mjs",
+      "bytes": 9762,
+      "sha256": "411c6bbf34722c6fa8174d0177bb38aeae37a1ba22e9ee973a4876b504cb4453"
+    }
+  ]
+}

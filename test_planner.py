@@ -171,8 +171,12 @@ class PlannerTests(unittest.TestCase):
                 {"type": "mission_progress", "count": 1},
                 {"type": "target_switch"},
                 {"type": "cop_proximity", "band": "danger", "distance": 40, "simulationElapsed": 8},
+                {"type": "escape_state", "state": "escape", "reason": "approach-or-distance", "distance": 50, "simulationElapsed": 7},
+                {"type": "recovery_start", "attempt": 1, "phase": 0, "simulationElapsed": 4},
             ],
-            "history": [{"nearestCopDistance": 40, "threat": 0.55}],
+            "history": [{"nearestCopDistance": 40, "threat": 0.55, "speed": 1,
+                         "belowSpeed": True, "copClosingSpeed": 12,
+                         "timeToContact": 3.3, "simulationElapsed": 8}],
             "last": {"terminalReason": "caught", "kind": "busted", "caught": True},
         })
         self.assertEqual(summary["pickups_observed"], 2)
@@ -180,6 +184,10 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(summary["target_switches"], 1)
         self.assertEqual(summary["minimum_cop_distance"], 40)
         self.assertEqual(summary["terminal_reason"], "caught")
+        self.assertEqual(summary["first_escape_time"], 7)
+        self.assertEqual(summary["recovery_attempts"], 1)
+        self.assertEqual(summary["low_speed_fraction"], 1.0)
+        self.assertEqual(summary["maximum_cop_closing_speed"], 12)
 
 
 if __name__ == "__main__":

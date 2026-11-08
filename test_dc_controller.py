@@ -5,6 +5,34 @@ from unittest.mock import patch
 import dc_controller
 
 
+class NetworkDiagnosticTests(unittest.TestCase):
+    def test_safe_response_fields_drop_nonce_wallet_and_score_payload(self):
+        fields = dc_controller._safe_response_fields(
+            '{"ok":true,"verified":true,"nonce":"secret","wallet":"secret",'
+            '"score":6000000000,"error":"none"}'
+        )
+        self.assertEqual(fields, {"json": True, "ok": True, "verified": True, "error": "none"})
+
+    def test_safe_response_fields_handles_non_json(self):
+        self.assertEqual(dc_controller._safe_response_fields("not-json"), {"json": False})
+
+    def test_api_path_ignores_unrelated_urls_and_query(self):
+        self.assertEqual(dc_controller._api_path("https://api.example/api/run?x=1"), "/api/run")
+        self.assertIsNone(dc_controller._api_path("https://api.example/health"))
+
+    def test_request_event_contains_metadata_but_not_body(self):
+        class Request:
+            url = "https://api.example/api/run"
+            method = "POST"
+            resource_type = "fetch"
+            post_data = '{"wallet":"secret"}'
+
+        event = dc_controller._redacted_request_event(Request())
+        self.assertEqual(event["path"], "/api/run")
+        self.assertTrue(event["has_body"])
+        self.assertNotIn("wallet", event)
+
+
 class AssetPinTests(unittest.TestCase):
     def test_production_pin_manifest_is_not_silently_changed(self):
         self.assertEqual(

@@ -29,20 +29,17 @@ CAPTURE_JS = r"""
   window.fetch = async (...args) => {
     const input = args[0], init = args[1] || {};
     const url = typeof input === 'string' ? input : (input && input.url) || String(input);
-    let payload = init.body;
-    if (payload == null && input && input.body) payload = input.body;
     window.__ghDiagnostics.requests.push({url, method: init.method || (input && input.method) || 'GET',
-      payload: typeof payload === 'string' ? payload : null, at: performance.now()});
+      hasBody: !!(init.body || (input && input.body)), at: performance.now()});
     const response = await original(...args);
-    let body = '';
-    try { body = await response.clone().text(); } catch (_) {}
-    window.__ghDiagnostics.responses.push({url, status: response.status, body, at: performance.now()});
+    window.__ghDiagnostics.responses.push({url, status: response.status, at: performance.now()});
     return response;
   };
 }
 """
 
 BLOCKED = {"/api/start", "/api/run", "/api/bind"}
+OBSERVED_API_PATHS = {"/api/start", "/api/run", "/api/bind"}
 PINNED_SITE = "https://www.gtaheist.fun/game"
 PINNED_ASSETS = {
     "https://www.gtaheist.fun/game/": "a328e728da7a705a600d648839b8288f214cd6b7fbc5f6e7ea792e943031b3cd",
@@ -84,6 +81,48 @@ def verify_official_assets() -> dict[str, dict[str, Any]]:
     return verified
 
 
+def _api_path(url: str) -> str | None:
+    path = urlsplit(url).path.rstrip("/")
+    return path if path in OBSERVED_API_PATHS else None
+
+
+def _safe_response_fields(body: str) -> dict[str, Any]:
+    """Keep only non-secret response fields useful for lifecycle diagnosis."""
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError):
+        return {"json": False}
+    if not isinstance(value, dict):
+        return {"json": True, "type": type(value).__name__}
+    safe = {key: value[key] for key in ("ok", "verified", "error", "status") if key in value}
+    return {"json": True, **safe}
+
+
+def _redacted_request_event(request: Any) -> dict[str, Any] | None:
+    path = _api_path(request.url)
+    if path is None:
+        return None
+    return {
+        "path": path,
+        "method": request.method,
+        "resource_type": request.resource_type,
+        "has_body": bool(request.post_data),
+    }
+
+
+def _redact_sensitive(value: Any) -> Any:
+    """Remove credentials and server-issued identifiers from saved telemetry."""
+    if isinstance(value, dict):
+        return {
+            key: _redact_sensitive(item)
+            for key, item in value.items()
+            if key not in {"wallet", "nonce", "code"}
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
+
+
 async def run_controller(*, username: str, wallet: str, target_score: int,
                          time_limit: float, submit: bool, out_dir: str,
                          headed: bool = False) -> dict[str, Any]:
@@ -107,6 +146,38 @@ async def run_controller(*, username: str, wallet: str, target_score: int,
         blocked: list[str] = []
         browser_assets: dict[str, dict[str, Any]] = {}
         asset_errors: list[str] = []
+        browser_requests: list[dict[str, Any]] = []
+        browser_responses: list[dict[str, Any]] = []
+        response_tasks: set[asyncio.Task[Any]] = set()
+
+        def on_request(request):
+            event = _redacted_request_event(request)
+            if event:
+                browser_requests.append(event)
+
+        async def capture_response(response):
+            path = _api_path(response.url)
+            if path is None:
+                return
+            body = ""
+            try:
+                body = await response.text()
+            except Exception:
+                pass
+            browser_responses.append({
+                "path": path,
+                "status": response.status,
+                "resource_type": response.request.resource_type,
+                "fields": _safe_response_fields(body),
+            })
+
+        def on_response(response):
+            task = asyncio.create_task(capture_response(response))
+            response_tasks.add(task)
+            task.add_done_callback(response_tasks.discard)
+
+        page.on("request", on_request)
+        page.on("response", on_response)
 
         async def route_handler(route):
             request_url = route.request.url
@@ -165,6 +236,11 @@ async def run_controller(*, username: str, wallet: str, target_score: int,
                 timeout=15_000,
             )
         controller = await page.evaluate(CONTROLLER_JS, {"targetScore": target_score, "timeLimit": time_limit})
+        # Give the official client a bounded opportunity to perform its own
+        # terminal callback. Do not manufacture a request or call an endpoint.
+        await page.wait_for_timeout(2_000)
+        if response_tasks:
+            await asyncio.gather(*tuple(response_tasks), return_exceptions=True)
         diagnostics = await page.evaluate(
             """() => ({diag: window.__ghDiagnostics || null, state: (() => {
               const s = window.__dc && window.__dc.S || {};
@@ -177,18 +253,20 @@ async def run_controller(*, username: str, wallet: str, target_score: int,
         controller["run_request_payloads"] = requests
         controller["run_responses"] = responses
         controller["summary"] = summarize_controller_diagnostics(controller)
-        result = {
+        result = _redact_sensitive({
             "verified_assets": verified_assets,
             "browser_verified_assets": browser_assets,
             "submit_requested": submit,
             "submitted": bool(submit and responses),
             "username": username,
-            "wallet": wallet,
+            "wallet_supplied": bool(wallet),
             "target_score": target_score,
             "time_limit": time_limit,
             "blocked_requests": blocked,
+            "browser_api_requests": browser_requests,
+            "browser_api_responses": browser_responses,
             "run": controller,
-        }
+        })
         (out / "last-result.json").write_text(json.dumps(result, indent=2) + "\n")
         await browser.close()
         return result

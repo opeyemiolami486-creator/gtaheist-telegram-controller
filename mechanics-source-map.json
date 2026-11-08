@@ -1,0 +1,51 @@
+{
+  "snapshot": {
+    "directory": "official-client",
+    "client_hash": "051e6ef9b8f550eac345a7fa855c38934e59ebffda46314f7cc29ac3cbe0f8ea",
+    "primary_file": "game.html",
+    "note": "game.html is minified; line 4760 contains the inline gameplay engine, so character offsets are authoritative."
+  },
+  "files": [
+    {
+      "file": "campaign.js",
+      "role": "account/campaign wrapper",
+      "line_count": 1502,
+      "physics_present": false,
+      "notes": ["Contains account/profile/API UI logic; no player update or vehicle physics loop found."]
+    },
+    {
+      "file": "game.html",
+      "role": "inline gameplay engine",
+      "line_count": 4885,
+      "regions": [
+        {"label": "difficulty configuration", "line": 4760, "char_start": 2778017, "symbols": ["Kn", "copSpd", "copMul", "dmg", "bust", "noOver", "time", "startWant", "cool"]},
+        {"label": "world constants", "line": 4760, "char_start": 2792764, "symbols": ["WA", "te", "LA", "Qe", "ke", "GP", "hA"]},
+        {"label": "wall and boundary collision", "line": 4760, "char_start": 2821285, "symbols": ["Kl", "Tw", "Su", "IT", "qu", "PD"]},
+        {"label": "reset and initial state", "line": 4760, "char_start": 2833952, "symbols": ["K8", "fw", "bag", "bank", "boostT", "magT", "x2T"]},
+        {"label": "player physics update", "line": 4760, "char_start": 2849159, "symbols": ["ET", "vx", "vz", "w", "n", "IP.up", "IP.down", "IP.boost", "IP.drift"]},
+        {"label": "pickup formula", "line": 4760, "char_start": 2851989, "symbols": ["l.bag", "combo", "comboT", "boostT", "magT", "x2T", "l.picks"]},
+        {"label": "rug, mission, stash economy", "line": 4760, "char_start": 2852511, "symbols": ["l.bag-=", "missionReward", "vZ", "stash", "sprayCD"]},
+        {"label": "cop pathing and contact", "line": 4760, "char_start": 2857312, "symbols": ["hP", "cop.v", "cop.h", "hitCD", "copSpd", "AT", "bustT"]},
+        {"label": "damage and terminal accounting", "line": 4760, "char_start": 2864508, "symbols": ["AT", "oc", "yT", "Cc", "lost", "reb", "total"]},
+        {"label": "public debug surface", "line": 4761, "char_start": 2916198, "symbols": ["window.__dc", "ghGeo", "S", "cops", "coins", "keys", "update"]}
+      ]
+    }
+  ],
+  "confirmed_formulas": [
+    "w = vx*sin(h) + vz*cos(h)",
+    "n = vx*cos(h) - vz*sin(h)",
+    "forward acceleration = (w<12 ? 24 : w<26 ? 15 : 8) * (boostT>0 ? 1.8 : 1) * dt",
+    "ordinary forward cap = (drift ? 36 : running ? boostInput ? 44 : 35 : 40) + (boostT>0 ? 18 : 0)",
+    "world speed cap = 75",
+    "pickup increment = round((120 + bag*0.06) * min(5, combo) * power/map modifiers)",
+    "mission reward = round(1500 + bag*0.5)",
+    "cop contact damage = (6 + relativeImpact*0.45) * difficulty.dmg",
+    "bust accumulation requires cop distance < 7.5 and abs(player speed) < 5",
+    "bust thresholds: chill 2.6s, degen 1.6s, wanted 0.9s"
+  ],
+  "inferred_or_pending": [
+    "Exact CFG token metadata and special ju() double-value region predicate need Step 3 runtime instrumentation.",
+    "Generated object placement and cop wave timing remain random unless the browser random source is controlled.",
+    "The public client does not expose an authoritative collision callback or server-side score validator."
+  ]
+}
