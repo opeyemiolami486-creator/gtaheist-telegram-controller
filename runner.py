@@ -99,8 +99,18 @@ async def run(username: str, wallet: str, target_score: int, time_limit: float, 
         await page.wait_for_timeout(1200)
         card_path = out / f"{run_result['last'].get('code') or 'run'}-card.png"
         try:
-            await page.locator('#card').screenshot(path=str(card_path), timeout=10000)
+            # Use the same official card-download path as the game UI. This
+            # preserves the game's generated art, typography, run code, and
+            # rank treatment instead of reconstructing a Telegram image.
+            async with page.expect_download(timeout=10000) as download_info:
+                await page.locator('#savecard').click(force=True)
+            download = await download_info.value
+            suggested = download.suggested_filename or card_path.name
+            card_path = out / suggested
+            await download.save_as(str(card_path))
         except Exception:
+            # Some headless Chromium builds block downloads from data URLs;
+            # the visible card is still the exact official generated image.
             await page.screenshot(path=str(card_path))
         result = {"username":username,"wallet":wallet,"target_score":target_score,"time_limit":time_limit,"binding":binding,"run":run_result,"card_path":str(card_path)}
         (out / "last-result.json").write_text(json.dumps(result, indent=2))
