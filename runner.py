@@ -15,6 +15,7 @@ CONTROLLER_JS = r"""
   const d = window.__dc;
   const keys = d.keys;
   const started = performance.now();
+  let simulationStart = null;
   const clean = () => { for (const k of ['up','down','left','right','drift','boost']) keys[k] = 0; };
   const point = x => x && Number.isFinite(x.x) && Number.isFinite(x.z) ? {x:x.x,z:x.z} : null;
   const snapshot = () => {
@@ -32,10 +33,17 @@ CONTROLLER_JS = r"""
   const tick = () => {
     const s = snapshot(); last = s;
     const elapsed = (performance.now()-started)/1000;
-    history.push({t:elapsed,bag:s.bag,want:s.want,picks:s.picks,bank:s.bank,heist:s.heist});
+    if (simulationStart == null && Number.isFinite(s.time)) simulationStart = s.time;
+    const simulationElapsed = simulationStart == null ? 0 : Math.max(0, simulationStart - s.time);
+    history.push({t:elapsed,simT:simulationElapsed,bag:s.bag,want:s.want,picks:s.picks,bank:s.bank,heist:s.heist});
     if (!s.running || s.over) { clean(); return; }
     if (s.bag >= targetScore) { clean(); d.finish(); return; }
-    if (elapsed >= timeLimit) { clean(); d.wasted('time limit'); return; }
+    // The official payload duration is measured by the game itself. In a
+    // software-rendered browser, wall time can advance faster than the game
+    // simulation, so ending on wall time creates the server clock mismatch.
+    if (simulationElapsed >= timeLimit) { clean(); d.wasted('time limit'); return; }
+    // Never leave a stuck browser open forever if rendering stops entirely.
+    if (elapsed >= Math.max(timeLimit * 4, timeLimit + 120)) { clean(); d.wasted('browser safety limit'); return; }
     // Keep the real game in its normal PRO input path.
     let target = null;
     if (s.mission) target = {kind:'mission',x:s.mission.x,z:s.mission.z,priority:1000};
@@ -50,12 +58,21 @@ CONTROLLER_JS = r"""
     if (target) lastTarget = target;
     const t = lastTarget;
     if (!t) { keys.up=1; keys.boost=1; return; }
-    const desired = Math.atan2(t.x-s.player.x, t.z-s.player.z);
+    const desiredTarget = Math.atan2(t.x-s.player.x, t.z-s.player.z);
+    const nearest = s.cops.map(c => ({c, d:Math.hypot(c.x-s.player.x,c.z-s.player.z)})).sort((a,b)=>a.d-b.d)[0];
+    // Wanted-mode cops are the dominant short-run failure mode. When one is
+    // close, temporarily choose an escape heading rather than crossing its
+    // position while chasing a coin or mission marker.
+    let desired = desiredTarget;
+    if (nearest && nearest.d < 62) {
+      const escape = Math.atan2(s.player.x-nearest.c.x, s.player.z-nearest.c.z);
+      desired = nearest.d < 34 ? escape : escape*.78 + desiredTarget*.22;
+    }
     const delta = (desired-s.player.h+Math.PI)%(2*Math.PI)-Math.PI;
-    keys.up=1; keys.down=(s.threat>.86 && Math.abs(delta)>1.25)?1:0;
+    keys.up=1; keys.down=(s.threat>.86 && nearest && nearest.d<28)?1:0;
     keys.left=delta < -.12 ? 1 : 0; keys.right=delta > .12 ? 1 : 0;
     keys.drift=Math.abs(delta)>1.0 ? 1 : 0;
-    keys.boost=(s.threat<.65 && Math.abs(delta)<.5) ? 1 : 0;
+    keys.boost=(s.threat<.45 && Math.abs(delta)<.5) ? 1 : 0;
   };
   const timer = setInterval(tick, 50); tick();
   return new Promise(resolve => {
@@ -69,14 +86,14 @@ CONTROLLER_JS = r"""
 async def run(username: str, wallet: str, target_score: int, time_limit: float, headed: bool = False, out_dir: str = "run-artifacts") -> dict[str, Any]:
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=not headed, args=["--disable-gpu", "--use-gl=swiftshader"])
-        context = await browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
+        browser = await pw.chromium.launch(headless=not headed, args=["--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-features=CalculateNativeWinOcclusion"])
+        context = await browser.new_context(viewport={"width": 640, "height": 360}, device_scale_factor=1)
         page = await context.new_page()
         await page.goto(SITE, wait_until="domcontentloaded", timeout=60000)
         # Leave the name empty during gameplay. The official game auto-submits
         # immediately on game-over when a name is present; delaying the name
         # lets the server's /api/start clock catch up before /api/run.
-        await page.evaluate("([wallet]) => { localStorage.removeItem('gtd_name'); localStorage.setItem('gtd_mode','pro'); localStorage.setItem('gth_wallet',wallet); }", [wallet])
+        await page.evaluate("([wallet]) => { localStorage.removeItem('gtd_name'); localStorage.setItem('gtd_mode','pro'); localStorage.setItem('gth_low','1'); localStorage.setItem('gth_wallet',wallet); }", [wallet])
         await page.reload(wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_function("() => window.__dc && document.querySelector('#start') && !document.querySelector('#start').disabled", timeout=60000)
         await page.evaluate("() => window.__dc && window.__dc.setMode && window.__dc.setMode('pro')")
