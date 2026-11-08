@@ -43,7 +43,7 @@ CONTROLLER_JS = r"""
   };
   const safe = (target,s) => target && !s.cops.some(c=>distance(c,target)<45) && !s.hazards.some(h=>distance(h,target)<14);
   const select = s => {
-    if (s.want>=3 || s.threat>=.92) return null;
+    if(s.threat>=.92) return null;
     const candidates=[];
     if(s.mission) candidates.push({kind:'mission',...s.mission,priority:1000});
     if(s.bag>=1000) s.stashes.forEach(x=>candidates.push({kind:'stash',...x,priority:900-distance(x,s.player)}));

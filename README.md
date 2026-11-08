@@ -44,3 +44,14 @@ python3 runner.py --username sandboxbot --wallet <valid-solana-address> --target
 ```
 
 Only treat a live run as successful when the captured `/api/run` response is verified by the game and `/api/bind` succeeds. Live runs require a valid wallet and network access; unit tests do not submit anything.
+
+## Clean-room headless sandbox
+
+`headless_sandbox.py` is an independent, offline approximation of the observed public state contract. It models movement, pickups, mission markers, stashes, cops, hazards, wanted level, banking, a simulation clock, and the controller's input flags. It contains no copied game source or assets and never contacts the official game or submits a score. This makes it suitable for deterministic policy comparisons before live validation:
+
+```bash
+python3 headless_sandbox.py
+python3 -m unittest -v test_planner.py test_headless_sandbox.py
+```
+
+The sandbox's `over_7b_rate` is a synthetic benchmark under its explicitly configured reward model, not evidence of an official 7B run. Only an official `/api/run` response with `verified: true` can establish a real score.

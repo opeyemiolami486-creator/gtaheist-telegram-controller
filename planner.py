@@ -93,7 +93,7 @@ def invalidate_target(state: dict[str, Any], target: Target | None, *, max_dista
 def choose_target(state: dict[str, Any]) -> Target | None:
     """Choose the safest useful objective from exposed official game state."""
     player = _pos(state.get("player"))
-    if not player or threat_score(state) >= 0.92 or state.get("want", 0) >= 3:
+    if not player or threat_score(state) >= 0.92:
         return None
     px, pz = player
 
