@@ -55,8 +55,11 @@ class Bot:
             try:
                 result=await run(username,wallet,target,limit,False)
                 r=result['run']['last']; bind=result['binding']; card=result['card_path']
-                await self.send(s,chat,f"Run finished. Code: {r.get('code') or 'unknown'}\nBag: ${r.get('bag',0):,}\nWanted: {r.get('want',0)}★\nPicks: {r.get('picks',0)}\nWallet binding: HTTP {bind.get('status')}")
-                await self.photo(s,chat,card,'GTA Heist result card')
+                verified=bool(bind.get('body',{}).get('verified')) or bind.get('status') == 200
+                status='verified' if verified else 'not verified'
+                await self.send(s,chat,f"Run finished ({status}). Code: {r.get('code') or 'unknown'}\nBag: ${r.get('bag',0):,}\nWanted: {r.get('want',0)}★\nPicks: {r.get('picks',0)}\nWallet binding: HTTP {bind.get('status')}")
+                if verified:
+                    await self.photo(s,chat,card,'GTA Heist result card')
             except asyncio.CancelledError: await self.send(s,chat,'Run cancelled. No result was submitted by the controller.')
             except Exception as e: LOG.exception('run failed'); await self.send(s,chat,f'Run failed: {type(e).__name__}: {e}')
         self.task=asyncio.create_task(job())

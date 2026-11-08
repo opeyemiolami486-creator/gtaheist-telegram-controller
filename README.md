@@ -27,8 +27,20 @@ For a headless smoke run without Telegram:
 python3 runner.py --username sandboxbot --wallet <valid-solana-address> --target 10000 --time-limit 15 --headed false
 ```
 
-The browser controller uses the game's public `window.__dc` state and its normal input path. It selects `wanted`, drives in PRO mode, targets coins, missions, Cold Stashes, the Vault/Rug Pull objectives when visible, and avoids cops/rugs with steering and braking. It does not patch the game score or call the score API with fabricated values.
+The browser controller uses the game's public `window.__dc` state and its normal input path. It selects `wanted`, drives in PRO mode, targets coins, missions, Cold Stashes, the Vault/Rug Pull objectives when visible, and lets police avoidance override collection when risk is high. It does not patch the game score, rewrite the official duration, or call the score API with fabricated values. The requested limit is evaluated against the official decreasing simulation clock; a wall-clock watchdog only prevents a hung browser.
+
+Each run writes `last-result.json`. Its `run` object contains per-frame telemetry (player motion, input state, target, police distance, threat, wanted level, bag/bank/pickups, simulation time and wall time) and the captured `/api/run` request payload and response. The diagnostic capture also records `S.time`, `S.t`, `S.ts`, `S.paused`, `window.__ghP`, visibility state, and frame timestamps, making clock mismatches reproducible without modifying the official request.
 
 ## Notes
 
 GTA Heist currently issues a `GH-XXXXXX` run code and nonce from `POST https://api.gtaheist.fun/api/start`. The wallet is attached with `POST /api/bind` using the same code and nonce, then the browser submits the real run through `POST /api/run`. The Telegram bot sends the card captured from the game's own end screen.
+
+## Validation
+
+```bash
+python3 -m py_compile planner.py runner.py telegram_bot.py
+python3 -m unittest -v test_planner.py
+python3 runner.py --username sandboxbot --wallet <valid-solana-address> --target 10000 --time-limit 10 --headed false --out-dir run-artifacts/diagnostic-10
+```
+
+Only treat a live run as successful when the captured `/api/run` response is verified by the game and `/api/bind` succeeds. Live runs require a valid wallet and network access; unit tests do not submit anything.
