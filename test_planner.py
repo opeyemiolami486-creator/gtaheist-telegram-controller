@@ -1,13 +1,16 @@
 import unittest
+from math import cos
 
-from runner import captured_run_events
+from runner import captured_run_events, summarize_controller_diagnostics
 from planner import (
     Target,
     choose_target,
     cop_avoidance_heading,
     emergency_escape_heading,
     invalidate_target,
+    objective_aware_escape_heading,
     recovery_inputs,
+    retain_target,
     should_boost,
     simulation_complete,
     steering,
@@ -24,6 +27,43 @@ class PlannerTests(unittest.TestCase):
     def test_stash_is_selected_when_bag_is_ready(self):
         t = choose_target({"player": {"x": 0, "z": 0}, "bag": 6000, "stashes": [{"x": 4, "z": 4}], "coins": [{"x": 1, "z": 1}]})
         self.assertEqual(t.kind, "stash")
+
+    def test_reachable_high_value_pickup_beats_distant_vault(self):
+        state = {
+            "player": {"x": -46, "z": -106}, "bag": 1000,
+            "coins": [
+                {"x": -44.5, "z": -165.8, "userData": {"tok": "$WIF"}},
+                {"x": -95.1, "z": -44.5, "userData": {"tok": "$PUMP"}},
+            ],
+            "vault": {"x": -35.5, "z": 0},
+            "rugHeist": {"x": -42, "z": 219},
+        }
+        target = choose_target(state)
+        self.assertEqual(target.kind, "coin")
+        self.assertAlmostEqual(target.x, -95.1, places=1)
+
+    def test_retained_target_is_stable_without_material_improvement(self):
+        current = Target("coin", 10, 0, 0)
+        state = {"player": {"x": 0, "z": 0}, "coins": [{"x": 10, "z": 0}, {"x": 11, "z": 1}],
+                 "vault": {"x": 80, "z": 0}}
+        selected = retain_target(state, current)
+        self.assertEqual(selected.kind, "coin")
+        self.assertAlmostEqual(selected.x, 10)
+
+    def test_reselects_when_retained_target_disappears(self):
+        current = Target("coin", 10, 0, 0)
+        state = {"player": {"x": 0, "z": 0}, "coins": [{"x": 50, "z": 0}],
+                 "vault": {"x": 18, "z": 0}}
+        selected = retain_target(state, current)
+        self.assertEqual(selected.kind, "vault")
+
+    def test_unsafe_retained_target_is_abandoned(self):
+        current = Target("coin", 10, 0, 0)
+        state = {"player": {"x": 0, "z": 0}, "coins": [{"x": 10, "z": 0}],
+                 "cops": [{"x": 10, "z": 5}], "vault": {"x": -60, "z": 0}}
+        selected = retain_target(state, current)
+        self.assertIsNotNone(selected)
+        self.assertNotEqual((selected.kind, selected.x), (current.kind, current.x))
 
     def test_cop_avoidance_heading_points_away(self):
         heading = cop_avoidance_heading({"x": 0, "z": 0}, [{"x": 0, "z": 20}])
@@ -53,13 +93,58 @@ class PlannerTests(unittest.TestCase):
     def test_steering_avoids_cop_and_disables_boost(self):
         flags = steering({"x": 0, "z": 0, "h": 0}, Target("coin", 0, 40, 1), danger=0.9, cops=[{"x": 0, "z": 20}], wanted=2)
         self.assertEqual(flags["boost"], 0)
-        self.assertEqual(flags["up"], 0)
-        self.assertEqual(flags["down"], 1)
+        self.assertEqual(flags["up"], 1)
+        self.assertEqual(flags["down"], 0)
+
+    def test_steering_turn_flags_match_official_heading_sign(self):
+        negative_delta = steering({"x": 0, "z": 0, "h": 0}, Target("coin", -20, 20, 10))
+        positive_delta = steering({"x": 0, "z": 0, "h": 0}, Target("coin", 20, 20, 10))
+        self.assertEqual((negative_delta["left"], negative_delta["right"]), (0, 1))
+        self.assertEqual((positive_delta["left"], positive_delta["right"]), (1, 0))
+
+    def test_steering_blends_cop_avoidance_without_dropping_target(self):
+        flags = steering({"x": 0, "z": 0, "h": 0}, Target("coin", 0, 100, 10),
+                         cops=[{"x": 0, "z": 40}])
+        self.assertEqual(flags["left"], 1)
+        self.assertEqual(flags["right"], 0)
+
+    def test_steering_overrides_target_only_in_immediate_collision_range(self):
+        flags = steering({"x": 0, "z": 0, "h": 0}, Target("coin", 0, 100, 10),
+                         cops=[{"x": 0, "z": 15}])
+        self.assertEqual(flags["left"], 1)
+        self.assertEqual(flags["right"], 0)
+
+    def test_aligned_escape_uses_boost_without_braking(self):
+        flags = steering({"x": 0, "z": 0, "h": 0, "speed": 10}, None,
+                         danger=0.78, cops=[{"x": 0, "z": -20}], wanted=1)
+        self.assertEqual(flags["up"], 1)
+        self.assertEqual(flags["down"], 0)
+        self.assertEqual(flags["boost"], 1)
 
     def test_emergency_escape_points_directly_away_from_close_cop(self):
         heading = emergency_escape_heading({"x": 0, "z": 0}, {"x": 0, "z": 10})
         self.assertIsNotNone(heading)
         self.assertAlmostEqual(abs(heading), 3.141592653589793, places=3)
+
+    def test_distant_cop_does_not_break_objective_tracking(self):
+        heading = objective_aware_escape_heading(
+            {"x": 0, "z": 0}, {"x": 0, "z": 100}, [{"x": 0, "z": -150}]
+        )
+        self.assertAlmostEqual(heading, 0.0, places=6)
+
+    def test_approaching_cop_adds_sidestep_while_tracking_target(self):
+        heading = objective_aware_escape_heading(
+            {"x": 0, "z": 0}, {"x": 0, "z": 100}, [{"x": 0, "z": 40}]
+        )
+        target_alignment = cos(heading)
+        self.assertGreater(abs(heading), 0.2)
+        self.assertGreater(target_alignment, 0.4)
+
+    def test_immediate_collision_range_overrides_objective(self):
+        heading = objective_aware_escape_heading(
+            {"x": 0, "z": 0}, {"x": 0, "z": 100}, [{"x": 0, "z": 15}]
+        )
+        self.assertLess(cos(heading), 0.0)
 
     def test_simulation_clock_termination(self):
         self.assertFalse(simulation_complete(9.9, 10))
@@ -78,6 +163,23 @@ class PlannerTests(unittest.TestCase):
         })
         self.assertEqual(requests[0]["payload"], '{"dur":24.9}')
         self.assertEqual(responses[0]["body"], '{"verified":true}')
+
+    def test_pickup_and_terminal_diagnostic_summary(self):
+        summary = summarize_controller_diagnostics({
+            "events": [
+                {"type": "pickup", "count": 2},
+                {"type": "mission_progress", "count": 1},
+                {"type": "target_switch"},
+                {"type": "cop_proximity", "band": "danger", "distance": 40, "simulationElapsed": 8},
+            ],
+            "history": [{"nearestCopDistance": 40, "threat": 0.55}],
+            "last": {"terminalReason": "caught", "kind": "busted", "caught": True},
+        })
+        self.assertEqual(summary["pickups_observed"], 2)
+        self.assertEqual(summary["missions_observed"], 1)
+        self.assertEqual(summary["target_switches"], 1)
+        self.assertEqual(summary["minimum_cop_distance"], 40)
+        self.assertEqual(summary["terminal_reason"], "caught")
 
 
 if __name__ == "__main__":

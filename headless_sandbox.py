@@ -11,7 +11,7 @@ from math import atan2, cos, hypot, pi, sin
 from random import Random
 from typing import Any
 
-from planner import Target, choose_target, steering
+from planner import Target, retain_target, steering
 
 
 @dataclass(frozen=True)
@@ -146,8 +146,7 @@ def step(state: SandboxState, cfg: SandboxConfig = SandboxConfig(), policy: Poli
     if state.over:
         return
     view = _planner_view(state)
-    if state.target is None or _distance(state.player, state.target.__dict__) < 12:
-        state.target = choose_target(view)
+    state.target = retain_target(view, state.target)
     danger = min(1.0, min((_distance(state.player, cop) for cop in state.cops), default=90.0) / -90.0 + 1.0)
     flags = steering(state.player, state.target, danger=danger, cops=state.cops, wanted=state.want)
     if state.bag >= policy.bank_threshold and state.stashes:

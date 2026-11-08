@@ -18,8 +18,9 @@ API = os.getenv("GTAHEIST_API_URL", "https://api.gtaheist.fun")
 CONTROLLER_JS = r"""
 ({targetScore, timeLimit}) => {
   const d = window.__dc, keys = d.keys, wallStart = performance.now();
-  let simulationStart = null, lastPlayer = null, stuckFrames = 0, lastTarget = null, emergencyReverseUntil = 0;
-  const history = [], frames = [];
+  let simulationStart = null, lastPlayer = null, stuckFrames = 0, lastTarget = null, lastPlanAt = 0;
+  let escapingFromPolice = false, stopReason = null, lastPicks = null, lastMissions = null, lastCopBand = null;
+  const history = [], frames = [], events = [];
   const clean = () => { for (const k of ['up','down','left','right','drift','boost']) keys[k] = 0; };
   const point = x => x && Number.isFinite(x.x) && Number.isFinite(x.z) ? {x:x.x,z:x.z} : null;
   const distance = (a,b) => a && b ? Math.hypot(a.x-b.x,a.z-b.z) : Infinity;
@@ -39,51 +40,109 @@ CONTROLLER_JS = r"""
       rugHeist:Number.isFinite(d.GX)&&Number.isFinite(d.GZ)?{x:d.GX,z:d.GZ}:null,cops,hazards,threat,
       nearestCopDistance:nearest?nearest.d:null,code:s.code||(s.srv&&s.srv.code)||null,nonce:(s.srv&&s.srv.nonce)||null,
       bank:Math.round(s.bank||0),picks:s.picks||0,heist:!!s.heist,rugDone:!!s.rugDone,
+      missions:Number(s.dh&&s.dh.missions||0),caught:!!s.caught,kind:s.kind||null,
       ghP:window.__ghP,visibility:document.visibilityState};
   };
   const safe = (target,s) => target && !s.cops.some(c=>distance(c,target)<45) && !s.hazards.some(h=>distance(h,target)<14);
-  const select = s => {
-    if(s.threat>=.92) return null;
+  const candidates = s => {
+    if(!s.player || s.threat>=.92) return [];
     const candidates=[];
-    if(s.mission) candidates.push({kind:'mission',...s.mission,priority:1000});
-    if(s.bag>=5000) s.stashes.forEach(x=>candidates.push({kind:'stash',...x,priority:900-distance(x,s.player)}));
-    s.coins.forEach(x=>{const tok=x.userData&&x.userData.tok; const bonus={$PUMP:60,$PEPE:50,$WIF:35,$BONK:30}[tok]||10; candidates.push({kind:'coin',x:x.x,z:x.z,priority:bonus-distance(x,s.player)*.05});});
-    if(s.vault) candidates.push({kind:'vault',...s.vault,priority:75});
-    if(s.rugHeist) candidates.push({kind:'rug_heist',...s.rugHeist,priority:75});
-    return candidates.filter(x=>safe(x,s)).sort((a,b)=>b.priority-a.priority)[0]||null;
+    if(s.mission) candidates.push({kind:'mission',...s.mission});
+    if(s.bag>=5000) s.stashes.forEach(x=>candidates.push({kind:'stash',...x}));
+    s.coins.forEach(x=>candidates.push({kind:'coin',x:x.x,z:x.z,userData:x.userData||{}}));
+    if(s.vault&&!s.heist) candidates.push({kind:'vault',...s.vault});
+    if(s.rugHeist&&!s.rugDone) candidates.push({kind:'rug_heist',...s.rugHeist});
+    const base={mission:140,stash:165,vault:105,rug_heist:95};
+    const tokenBase={$PUMP:120,$PEPE:105,$WIF:90,$BONK:80};
+    return candidates.filter(x=>safe(x,s)).map(x=>{
+      const value=x.kind==='coin'?(tokenBase[x.userData&&x.userData.tok]||70):(base[x.kind]||0);
+      const copDistance=s.cops.length?Math.min(...s.cops.map(c=>distance(c,x))):Infinity;
+      const copPenalty=Number.isFinite(copDistance)?Math.max(0,80-copDistance)*.3:0;
+      return {...x,priority:value/(1+distance(x,s.player)/100)-s.threat*20-copPenalty};
+    }).sort((a,b)=>b.priority-a.priority);
+  };
+  const present=(target,s)=>{
+    const near=(items)=>items.some(x=>distance(x,target)<=8);
+    if(target.kind==='coin') return near(s.coins);
+    if(target.kind==='mission') return !!s.mission&&distance(s.mission,target)<=8;
+    if(target.kind==='stash') return s.bag>=5000&&near(s.stashes);
+    if(target.kind==='vault') return !!s.vault&&!s.heist&&distance(s.vault,target)<=8;
+    if(target.kind==='rug_heist') return !!s.rugHeist&&!s.rugDone&&distance(s.rugHeist,target)<=8;
+    return false;
+  };
+  const sameTarget=(a,b)=>!!a&&!!b&&a.kind===b.kind&&distance(a,b)<=8;
+  const objectiveHeading=(player,target,cops)=>{
+    const goal=target?{x:target.x-player.x,z:target.z-player.z}:null;
+    const goalLength=goal?Math.hypot(goal.x,goal.z):0;
+    const gx=goalLength>1e-9?goal.x/goalLength:0, gz=goalLength>1e-9?goal.z/goalLength:0;
+    const immediate=cops.some(c=>distance(player,c)<22);
+    let fx=immediate?0:gx, fz=immediate?0:gz, nearestDistance=Infinity, nearestAway=null;
+    const span=100-22;
+    for(const cop of cops){
+      const dx=player.x-cop.x,dz=player.z-cop.z,d=Math.hypot(dx,dz);
+      const ax=d>1e-9?dx/d:0,az=d>1e-9?dz/d:-1;
+      if(d<nearestDistance){nearestDistance=d;nearestAway={x:ax,z:az};}
+      if(d>=100) continue;
+      const proximity=Math.max(0,Math.min(1,(100-d)/span)),strength=.85*proximity*proximity;
+      const tx=-ax,tz=-az,alignment=goalLength>1e-9?Math.max(0,Math.min(1,gx*tx+gz*tz)):0;
+      const cross=gx*tz-gz*tx,side=cross>=0?1:-1;
+      const tangentX=-az*side,tangentZ=ax*side;
+      fx+=strength*(ax+alignment*tangentX);fz+=strength*(az+alignment*tangentZ);
+    }
+    if(Math.hypot(fx,fz)<=1e-9){if(!nearestAway||(!immediate&&nearestDistance>=100))return null;fx=nearestAway.x;fz=nearestAway.z;}
+    return Math.atan2(fx,fz);
+  };
+  const plan=(s,now)=>{
+    const options=candidates(s), best=options[0]||null;
+    const current=lastTarget&&options.find(x=>sameTarget(x,lastTarget));
+    if(!current || !present(lastTarget,s) || !safe(lastTarget,s)) lastTarget=best;
+    else if(now-lastPlanAt>=500){
+      const margin=Math.max(8,Math.abs(current.priority)*.15);
+      if(best&&!sameTarget(best,current)&&best.priority>current.priority+margin) lastTarget=best;
+      else lastTarget=current;
+    } else if(current) lastTarget=current;
+    if(now-lastPlanAt>=500||!lastPlanAt) lastPlanAt=now;
+    return lastTarget;
   };
   const tick = () => {
     const s=snapshot(), wallElapsed=(performance.now()-wallStart)/1000;
     if(simulationStart===null && Number.isFinite(s.time)) simulationStart=s.time;
     const simElapsed=simulationStart===null?0:Math.max(0,simulationStart-s.time);
+    if(lastPicks===null) lastPicks=s.picks;
+    if(s.picks>lastPicks) events.push({type:'pickup',count:s.picks-lastPicks,picks:s.picks,simulationElapsed:simElapsed});
+    if(lastMissions===null) lastMissions=s.missions;
+    if(s.missions>lastMissions) events.push({type:'mission_progress',count:s.missions-lastMissions,missions:s.missions,simulationElapsed:simElapsed});
+    lastPicks=s.picks; lastMissions=s.missions;
+    const copBand=s.nearestCopDistance===null?'none':s.nearestCopDistance<28?'critical':s.nearestCopDistance<45?'danger':s.nearestCopDistance<62?'caution':'clear';
+    if(copBand!==lastCopBand){events.push({type:'cop_proximity',band:copBand,distance:s.nearestCopDistance,simulationElapsed:simElapsed});lastCopBand=copBand;}
     if(lastPlayer && distance(lastPlayer,s.player)<2 && s.speed<2) stuckFrames++; else stuckFrames=0;
     lastPlayer={x:s.player.x,z:s.player.z};
-    const frame={wallElapsed,simulationElapsed:simElapsed,frameTime:performance.now(),...s,target:lastTarget,stuckFrames};
+    if(!s.running||s.over){if(!stopReason)stopReason=s.caught?'caught':(s.kind||'official_terminal');clean();}
+    else if(s.bag>=targetScore){stopReason='target_score';clean();d.finish();}
+    else if(simElapsed>=timeLimit){stopReason='simulation_time_limit';clean();d.wasted('time limit');}
+    else if(wallElapsed>=Math.max(timeLimit*4,timeLimit+120)){stopReason='browser_safety_watchdog';clean();d.wasted('browser safety limit');}
+    const priorTarget=lastTarget;
+    if(s.nearestCopDistance!==null&&s.nearestCopDistance<22) escapingFromPolice=true;
+    else if(s.nearestCopDistance===null||s.nearestCopDistance>26) escapingFromPolice=false;
+    const target=(!s.running||s.over)?lastTarget:(escapingFromPolice?null:plan(s,performance.now()));
+    if(escapingFromPolice) lastTarget=null;
+    if((priorTarget||target)&&!sameTarget(priorTarget,target)) events.push({type:'target_switch',from:priorTarget&&priorTarget.kind||null,to:target&&target.kind||null,simulationElapsed:simElapsed});
+    const frame={wallElapsed,simulationElapsed:simElapsed,frameTime:performance.now(),...s,target,stuckFrames};
     history.push(frame); frames.push(frame); if(frames.length>120) frames.shift();
-    if(!s.running||s.over){clean();return;}
-    if(s.bag>=targetScore){clean();d.finish();return;}
-    if(simElapsed>=timeLimit){clean();d.wasted('time limit');return;}
-    if(wallElapsed>=Math.max(timeLimit*4,timeLimit+120)){clean();d.wasted('browser safety limit');return;}
+    if(!s.running||s.over||stopReason==='target_score'||stopReason==='simulation_time_limit'||stopReason==='browser_safety_watchdog') return;
     const nearest=s.cops.map(c=>({c,d:distance(c,s.player)})).sort((a,b)=>a.d-b.d)[0];
-    // A retained objective is not worth crossing a close cop. Clear it before
-    // planning so the emergency escape cannot be pulled back toward the target.
-    if(nearest&&nearest.d<52) lastTarget=null;
-    if((!nearest||nearest.d>=52) && (!lastTarget || !safe(lastTarget,s) || (lastTarget.kind==='mission'&&!s.mission))) lastTarget=select(s);
-    let desired=lastTarget?Math.atan2(lastTarget.x-s.player.x,lastTarget.z-s.player.z):s.player.h;
-    if(nearest&&nearest.d<52){desired=Math.atan2(s.player.x-nearest.c.x,s.player.z-nearest.c.z);}
-    else if(nearest&&nearest.d<62){const away=Math.atan2(s.player.x-nearest.c.x,s.player.z-nearest.c.z); desired=away*.78+desired*.22;}
-    if(stuckFrames>=12&&(!nearest||nearest.d>=52)){keys.up=0;keys.down=1;keys.left=(Math.floor(stuckFrames/20)%2)===0?1:0;keys.right=keys.left?0:1;keys.drift=1;keys.boost=0;frame.input={...keys};return;}
+    let desired=objectiveHeading(s.player,lastTarget,s.cops);
+    if(desired===null) desired=s.player.h;
+    if(stuckFrames>=12&&!escapingFromPolice){keys.up=0;keys.down=1;keys.left=(Math.floor(stuckFrames/20)%2)===0?1:0;keys.right=keys.left?0:1;keys.drift=1;keys.boost=0;frame.input={...keys};return;}
     const delta=(desired-s.player.h+Math.PI)%(2*Math.PI)-Math.PI;
-    const emergency=!!(nearest&&nearest.d<52);
-    if(!emergency) emergencyReverseUntil=0;
-    else if(s.speed<2&&performance.now()>=emergencyReverseUntil) emergencyReverseUntil=performance.now()+1500;
-    const emergencyReverse=emergency&&performance.now()<emergencyReverseUntil;
-    keys.up=emergencyReverse?0:1;keys.down=emergencyReverse?1:((s.threat>.86&&nearest&&nearest.d<28)?1:0);
-    keys.left=delta<-.12?1:0;keys.right=delta>.12?1:0;keys.drift=Math.abs(delta)>1?1:0;
-    keys.boost=(!emergency&&s.threat<.45&&s.want<2&&Math.abs(delta)<.5)?1:0; frame.input={...keys};
+    const emergency=!!(nearest&&nearest.d<100);
+    keys.up=1;keys.down=0;
+    // Official telemetry shows left increases heading and right decreases it.
+    keys.left=delta>.12?1:0;keys.right=delta<-.12?1:0;keys.drift=Math.abs(delta)>1?1:0;
+    keys.boost=(s.want<2&&Math.abs(delta)<.5&&((!emergency&&s.threat<.45)||emergency))?1:0; frame.input={...keys};
   };
   const timer=setInterval(tick,50); tick();
-  return new Promise(resolve=>{const finish=()=>{clearInterval(timer);clean();resolve({last:snapshot(),history:history.slice(-240),frames:frames.slice(-120),wallElapsed:(performance.now()-wallStart)/1000,simulationStart});};
+  return new Promise(resolve=>{const finish=()=>{clearInterval(timer);clean();const last=snapshot();last.terminalReason=stopReason||(last.caught?'caught':last.kind||'official_terminal');resolve({last,history:history.slice(-240),frames:frames.slice(-120),events,wallElapsed:(performance.now()-wallStart)/1000,simulationStart});};
     const wait=()=>{const s=snapshot();if(!s.running||s.over)finish();else setTimeout(wait,100);}; wait();});
 }
 """
@@ -113,6 +172,30 @@ def captured_run_events(diagnostics: dict[str, Any] | None) -> tuple[list[dict[s
     requests = [item for item in diagnostics.get("requests", []) if "/api/run" in item.get("url", "")]
     responses = [item for item in diagnostics.get("responses", []) if "/api/run" in item.get("url", "")]
     return requests, responses
+
+
+def summarize_controller_diagnostics(controller: dict[str, Any]) -> dict[str, Any]:
+    """Condense observed controller events without inferring unobserved outcomes."""
+    events = controller.get("events") or []
+    history = controller.get("history") or []
+    last = controller.get("last") or {}
+    return {
+        "pickups_observed": sum(int(e.get("count", 0)) for e in events if e.get("type") == "pickup"),
+        "missions_observed": sum(int(e.get("count", 0)) for e in events if e.get("type") == "mission_progress"),
+        "target_switches": sum(1 for e in events if e.get("type") == "target_switch"),
+        "cop_proximity_transitions": [
+            {"band": e.get("band"), "distance": e.get("distance"), "simulationElapsed": e.get("simulationElapsed")}
+            for e in events if e.get("type") == "cop_proximity"
+        ],
+        "minimum_cop_distance": min(
+            (float(f["nearestCopDistance"]) for f in history if f.get("nearestCopDistance") is not None),
+            default=None,
+        ),
+        "maximum_threat": max((float(f.get("threat", 0)) for f in history), default=0.0),
+        "terminal_reason": last.get("terminalReason"),
+        "terminal_kind": last.get("kind"),
+        "caught_flag": last.get("caught"),
+    }
 
 
 async def run(username: str, wallet: str, target_score: int, time_limit: float,

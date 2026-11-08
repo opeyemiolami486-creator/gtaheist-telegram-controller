@@ -38,8 +38,8 @@ GTA Heist currently issues a `GH-XXXXXX` run code and nonce from `POST https://a
 ## Validation
 
 ```bash
-python3 -m py_compile planner.py runner.py telegram_bot.py
-python3 -m unittest -v test_planner.py
+python3 -m py_compile planner.py runner.py telegram_bot.py dc_controller.py official_engine_probe.py headless_sandbox.py analyze_browser_traces.py
+python3 -m unittest -v test_planner.py test_headless_sandbox.py test_dc_controller.py test_analyze_browser_traces.py
 python3 runner.py --username sandboxbot --wallet <valid-solana-address> --target 10000 --time-limit 10 --headed false --out-dir run-artifacts/diagnostic-10
 ```
 
@@ -48,6 +48,10 @@ Only treat a live run as successful when the captured `/api/run` response is ver
 ## Direct official-engine controller
 
 `dc_controller.py` drives the public game's own `window.__dc` surface in a headless Chromium page. It sets only normal movement flags in `window.__dc.keys`, uses the official client update loop and terminal transitions, captures the untouched `/api/run` request/response, and never invents a score, nonce, or run code.
+
+Before opening the game, it verifies SHA-256 hashes for the pinned game HTML, campaign wrapper, and share-card module recorded in `official-engine-inspection.md`. A custom game URL, unavailable asset, or hash mismatch aborts the run before browser interaction. The default dry run blocks `/api/start`, `/api/run`, and `/api/bind`; live runs should only be attempted after that dry run survives the requested simulation window and records meaningful telemetry.
+
+The current policy scores objectives by estimated token/objective value discounted by travel distance and visible police risk, retaining a safe target unless a materially better one appears. Steering combines the objective bearing with smooth repulsion and a sidestep vector from all nearby cops; it suppresses objective attraction only inside the 22-unit immediate-collision radius, with a short release hysteresis. Browser telemetry records pickup and mission deltas, target switches, cop-distance bands, terminal flags, and an event summary. These heuristics remain experimental: short dry runs do not establish 90-second survival or any target score.
 
 The default is an isolated dry run. It blocks `/api/start`, `/api/run`, and `/api/bind`, so it cannot create or submit a live score:
 
@@ -76,3 +80,13 @@ python3 -m unittest -v test_planner.py test_headless_sandbox.py
 ```
 
 The sandbox's `over_7b_rate` is a synthetic benchmark under its explicitly configured reward model, not evidence of an official 7B run. Only an official `/api/run` response with `verified: true` can establish a real score.
+
+## Browser trace analysis
+
+`analyze_browser_traces.py` recursively parses saved `last-result.json` files and writes `player_frames.csv`, `cop_appearances.csv`, `collision_candidates.csv`, and `summary.json`:
+
+```bash
+python3 analyze_browser_traces.py run-artifacts --out-dir run-artifacts/trace-analysis
+```
+
+Player speed includes both the browser-recorded value and frame-to-frame displacement estimates. Cop timings indicate first appearance in the sampled browser state; close-approach coordinates are sampled or linearly interpolated estimates, not authoritative collision callbacks.

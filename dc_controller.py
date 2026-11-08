@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from playwright.async_api import async_playwright
 
-from runner import API, CONTROLLER_JS, SITE, captured_run_events
+from runner import API, CONTROLLER_JS, SITE, captured_run_events, summarize_controller_diagnostics
 
 CAPTURE_JS = r"""
 () => {
@@ -40,11 +43,51 @@ CAPTURE_JS = r"""
 """
 
 BLOCKED = {"/api/start", "/api/run", "/api/bind"}
+PINNED_SITE = "https://www.gtaheist.fun/game"
+PINNED_ASSETS = {
+    "https://www.gtaheist.fun/game/": "a328e728da7a705a600d648839b8288f214cd6b7fbc5f6e7ea792e943031b3cd",
+    "https://www.gtaheist.fun/game/campaign.js": "ff7eb566745a5a2a1316f65637c8e1996f0089aebd3c43b86aee03f7344581e0",
+    "https://www.gtaheist.fun/game/share-card.mjs": "411c6bbf34722c6fa8174d0177bb38aeae37a1ba22e9ee973a4876b504cb4453",
+}
+
+
+def _canonical_asset_url(url: str) -> str:
+    parsed = urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def verify_asset_content(url: str, content: bytes) -> dict[str, Any]:
+    """Validate one response body against its exact pinned official URL/hash."""
+    canonical_url = _canonical_asset_url(url)
+    expected = PINNED_ASSETS.get(canonical_url)
+    if expected is None:
+        raise RuntimeError(f"Refusing unpinned client asset: {canonical_url}")
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"Official client asset changed; refusing to run: {canonical_url} "
+            f"(expected {expected}, got {actual})"
+        )
+    return {"sha256": actual, "bytes": len(content)}
+
+
+def verify_official_assets() -> dict[str, dict[str, Any]]:
+    """Verify pinned official client bytes and refuse unknown/custom bundles."""
+    if SITE.rstrip("/") != PINNED_SITE:
+        raise RuntimeError(f"Refusing unpinned game URL: {SITE}")
+    verified: dict[str, dict[str, Any]] = {}
+    for url, expected in PINNED_ASSETS.items():
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(request, timeout=30) as response:
+            content = response.read()
+        verified[url] = verify_asset_content(url, content)
+    return verified
 
 
 async def run_controller(*, username: str, wallet: str, target_score: int,
                          time_limit: float, submit: bool, out_dir: str,
                          headed: bool = False) -> dict[str, Any]:
+    verified_assets = verify_official_assets()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as pw:
@@ -57,20 +100,40 @@ async def run_controller(*, username: str, wallet: str, target_score: int,
                 "--disable-features=CalculateNativeWinOcclusion",
             ],
         )
-        context = await browser.new_context(viewport={"width": 640, "height": 360}, device_scale_factor=1)
+        context = await browser.new_context(
+            viewport={"width": 640, "height": 360}, device_scale_factor=1, service_workers="block"
+        )
         page = await context.new_page()
         blocked: list[str] = []
+        browser_assets: dict[str, dict[str, Any]] = {}
+        asset_errors: list[str] = []
 
         async def route_handler(route):
-            path = route.request.url.split("?", 1)[0].rstrip("/")
-            if not submit and any(path.endswith(x) for x in BLOCKED):
+            request_url = route.request.url
+            canonical_url = _canonical_asset_url(request_url)
+            parsed = urlsplit(request_url)
+            path = parsed.path.rstrip("/")
+            if not submit and path in BLOCKED:
                 blocked.append(route.request.url)
                 await route.abort()
+            elif canonical_url in PINNED_ASSETS:
+                try:
+                    response = await route.fetch()
+                    if _canonical_asset_url(response.url) != canonical_url:
+                        raise RuntimeError(f"Pinned asset redirected: {canonical_url} -> {response.url}")
+                    body = await response.body()
+                    browser_assets[canonical_url] = verify_asset_content(canonical_url, body)
+                    await route.fulfill(response=response, body=body)
+                except Exception as exc:
+                    asset_errors.append(f"{canonical_url}: {exc}")
+                    await route.abort()
             else:
                 await route.continue_()
 
         await page.route("**/*", route_handler)
         await page.goto(SITE, wait_until="domcontentloaded", timeout=60_000)
+        if asset_errors:
+            raise RuntimeError("Browser loaded an unverified official client asset: " + "; ".join(asset_errors))
         await page.evaluate(
             "([name, wallet]) => { localStorage.setItem('gtd_name', name); "
             "localStorage.setItem('gtd_mode', 'pro'); localStorage.setItem('gth_low', '1'); "
@@ -82,6 +145,15 @@ async def run_controller(*, username: str, wallet: str, target_score: int,
             "() => window.__dc && document.querySelector('#start') && !document.querySelector('#start').disabled",
             timeout=60_000,
         )
+        required_assets = {
+            "https://www.gtaheist.fun/game/",
+            "https://www.gtaheist.fun/game/campaign.js",
+        }
+        if asset_errors or not required_assets.issubset(browser_assets):
+            raise RuntimeError(
+                "Browser did not load all pinned core assets; "
+                f"verified={sorted(browser_assets)}, errors={asset_errors}"
+            )
         await page.evaluate("() => window.__dc.setMode && window.__dc.setMode('pro')")
         await page.evaluate(CAPTURE_JS)
         await page.locator('#diff button[data-d="wanted"]').click(force=True)
@@ -104,7 +176,10 @@ async def run_controller(*, username: str, wallet: str, target_score: int,
         requests, responses = captured_run_events(diagnostics.get("diag"))
         controller["run_request_payloads"] = requests
         controller["run_responses"] = responses
+        controller["summary"] = summarize_controller_diagnostics(controller)
         result = {
+            "verified_assets": verified_assets,
+            "browser_verified_assets": browser_assets,
             "submit_requested": submit,
             "submitted": bool(submit and responses),
             "username": username,
@@ -150,6 +225,7 @@ def main() -> None:
         "blocked_requests": len(result["blocked_requests"]),
         "run_requests": len(result["run"].get("run_request_payloads", [])),
         "run_responses": len(result["run"].get("run_responses", [])),
+        "summary": result["run"].get("summary"),
         "final": result["run"].get("last"),
     }, indent=2))
 
